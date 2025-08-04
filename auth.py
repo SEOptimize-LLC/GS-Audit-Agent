@@ -1,103 +1,193 @@
 """
-OAuth Diagnostic Script
-Run this to find EXACTLY what's wrong with your OAuth setup
+Simplified OAuth Authentication for GSC
+This version focuses on direct OAuth connection without workarounds
 """
 
+import streamlit as st
 import os
-from dotenv import load_dotenv
-import requests
-import json
-from urllib.parse import urlencode, quote
+import pickle
+from pathlib import Path
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
-load_dotenv()
+# Import config
+try:
+    from config import GSC_SCOPES, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ERROR_MESSAGES, SUCCESS_MESSAGES
+except ImportError:
+    # Fallback if config is not properly set
+    GSC_SCOPES = ['https://www.googleapis.com/auth/webmasters.readonly']
+    GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+    GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
+    ERROR_MESSAGES = {'auth_failed': 'Authentication failed'}
+    SUCCESS_MESSAGES = {'auth_success': 'Authentication successful'}
 
-print("=" * 60)
-print("GOOGLE OAUTH DIAGNOSTIC")
-print("=" * 60)
 
-# 1. Check credentials exist
-client_id = os.getenv('GOOGLE_CLIENT_ID', '')
-client_secret = os.getenv('GOOGLE_CLIENT_SECRET', '')
+def handle_authentication():
+    """Simple, direct OAuth authentication"""
+    
+    st.sidebar.header("🔐 Google Search Console Authentication")
+    
+    # Check if already authenticated
+    if st.session_state.get('authenticated'):
+        st.sidebar.success("✅ Connected to Google Search Console")
+        if st.sidebar.button("Disconnect"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+        return True
+    
+    # Check for saved credentials
+    token_file = Path('.token/gsc_token.pickle')
+    if token_file.exists():
+        try:
+            with open(token_file, 'rb') as f:
+                creds = pickle.load(f)
+            
+            # If valid, use them
+            if creds and creds.valid:
+                service = build('searchconsole', 'v1', credentials=creds)
+                st.session_state.gsc_service = service
+                st.session_state.authenticated = True
+                return True
+            
+            # If expired, refresh
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(token_file, 'wb') as f:
+                    pickle.dump(creds, f)
+                service = build('searchconsole', 'v1', credentials=creds)
+                st.session_state.gsc_service = service
+                st.session_state.authenticated = True
+                return True
+        except:
+            pass
+    
+    # Need to authenticate
+    st.sidebar.markdown("### Connect to Google Search Console")
+    
+    # Determine redirect URI
+    if st.sidebar.checkbox("I'm using Streamlit Cloud"):
+        redirect_uri = st.sidebar.text_input(
+            "Your app URL (EXACT match required):",
+            placeholder="https://yourapp.streamlit.app/",
+            help="⚠️ Must match EXACTLY what's in Google Cloud Console"
+        )
+    else:
+        redirect_uri = "http://localhost:8501/"
+        st.sidebar.info(f"Using redirect URI: {redirect_uri}")
+    
+    # Check for OAuth callback
+    try:
+        # Try modern Streamlit API first
+        params = dict(st.query_params)
+    except (AttributeError, Exception):
+        try:
+            # Fall back to experimental API
+            params_raw = st.experimental_get_query_params()
+            params = {k: v[0] if isinstance(v, list) else v for k, v in params_raw.items()}
+        except (AttributeError, Exception):
+            params = {}
+    
+    if 'code' in params:
+        # We have an auth code!
+        code = params['code']
+        
+        # Create flow to exchange code for credentials
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [redirect_uri]
+                }
+            },
+            scopes=GSC_SCOPES,
+            redirect_uri=redirect_uri
+        )
+        
+        try:
+            # Exchange code for token
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            
+            # Save credentials
+            token_file.parent.mkdir(exist_ok=True)
+            with open(token_file, 'wb') as f:
+                pickle.dump(creds, f)
+            
+            # Build service
+            service = build('searchconsole', 'v1', credentials=creds)
+            
+            # Test it works
+            sites = service.sites().list().execute()
+            
+            # Success!
+            st.session_state.gsc_service = service
+            st.session_state.authenticated = True
+            
+            # Clear URL parameters
+            try:
+                st.query_params.clear()
+            except AttributeError:
+                try:
+                    st.experimental_set_query_params()
+                except:
+                    pass
+            
+            st.success("✅ Successfully connected!")
+            st.balloons()
+            st.rerun()
+            
+        except Exception as e:
+            st.sidebar.error(f"Authentication failed: {str(e)}")
+            st.sidebar.error("Check that your redirect URI matches EXACTLY")
+    
+    else:
+        # Show connect button
+        if redirect_uri and st.sidebar.button("🔗 Connect to Google", type="primary", use_container_width=True):
+            # Create OAuth flow
+            flow = Flow.from_client_config(
+                {
+                    "web": {
+                        "client_id": GOOGLE_CLIENT_ID,
+                        "client_secret": GOOGLE_CLIENT_SECRET,
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "redirect_uris": [redirect_uri]
+                    }
+                },
+                scopes=GSC_SCOPES,
+                redirect_uri=redirect_uri
+            )
+            
+            # Generate auth URL
+            auth_url, _ = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='consent'
+            )
+            
+            # Redirect to Google
+            st.markdown(f'<meta http-equiv="refresh" content="0;url={auth_url}">', unsafe_allow_html=True)
+    
+    return False
 
-print("\n1. CHECKING CREDENTIALS:")
-print(f"   Client ID found: {'✅' if client_id else '❌'}")
-print(f"   Client Secret found: {'✅' if client_secret else '❌'}")
 
-if not client_id or not client_secret:
-    print("\n❌ MISSING CREDENTIALS - Add them to .env file")
-    exit(1)
-
-print(f"\n   Client ID: {client_id}")
-
-# 2. Test OAuth endpoint
-print("\n2. TESTING OAUTH CONFIGURATION:")
-
-# Build auth URL manually
-params = {
-    'client_id': client_id,
-    'redirect_uri': 'http://localhost:8501/',
-    'response_type': 'code',
-    'scope': 'https://www.googleapis.com/auth/webmasters.readonly',
-    'access_type': 'offline',
-    'prompt': 'consent'
-}
-
-auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-
-print(f"\n   Generated Auth URL:")
-print(f"   {auth_url}")
-
-# 3. Test if client ID is valid format
-print("\n3. VALIDATING CLIENT ID FORMAT:")
-if client_id.endswith('.apps.googleusercontent.com'):
-    print("   ✅ Client ID format is correct")
-else:
-    print("   ❌ Client ID format is WRONG!")
-    print("   Should end with: .apps.googleusercontent.com")
-
-# 4. Common issues check
-print("\n4. COMMON ISSUES TO CHECK IN GOOGLE CLOUD CONSOLE:")
-print("\n   OAuth Consent Screen:")
-print("   □ Is it configured? (Required!)")
-print("   □ Is it in 'Testing' or 'Production' mode?")
-print("   □ If Testing: Are test users added?")
-print("   □ Is your email in test users?")
-
-print("\n   OAuth 2.0 Client ID:")
-print("   □ Type: Must be 'Web application' (not Desktop!)")
-print("   □ Authorized redirect URIs must include:")
-print("     - http://localhost:8501/")
-print("     - http://localhost:8501")
-print("     - Your production URL (if using Streamlit Cloud)")
-
-print("\n   APIs:")
-print("   □ Is 'Google Search Console API' enabled?")
-
-print("\n5. TESTING AUTH URL:")
-print("\n   Copy this URL and paste in your browser:")
-print(f"\n   {auth_url}\n")
-
-print("   Expected behavior:")
-print("   - You should see Google's sign-in page")
-print("   - After signing in, you see consent screen")
-print("   - After consent, redirected to localhost:8501/?code=...")
-
-print("\n   If you see 'Access blocked: This app's request is invalid':")
-print("   → Your OAuth client is misconfigured in Google Cloud Console")
-print("   → Most likely: Wrong client type or missing consent screen")
-
-print("\n6. QUICK FIX STEPS:")
-print("   1. Go to: https://console.cloud.google.com")
-print("   2. Select your project")
-print("   3. Go to 'APIs & Services' > 'OAuth consent screen'")
-print("   4. Configure it (if not done)")
-print("   5. Go to 'APIs & Services' > 'Credentials'")
-print("   6. Click your OAuth 2.0 Client ID")
-print("   7. Verify it's type 'Web application'")
-print("   8. Add these Authorized redirect URIs:")
-print("      - http://localhost:8501/")
-print("      - http://localhost:8501")
-print("      - https://YOUR-APP.streamlit.app/")
-print("      - https://YOUR-APP.streamlit.app")
-
-print("\n" + "=" * 60)
+class GSCAuthenticator:
+    """Simple authenticator class for compatibility"""
+    
+    def list_properties(self):
+        """List GSC properties"""
+        if not st.session_state.get('gsc_service'):
+            return []
+        
+        try:
+            response = st.session_state.gsc_service.sites().list().execute()
+            return [site['siteUrl'] for site in response.get('siteEntry', [])]
+        except:
+            return []
