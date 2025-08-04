@@ -17,9 +17,12 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
 GOOGLE_AI_API_KEY = os.getenv('GOOGLE_AI_API_KEY')
 
+# Debug mode
+DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
+
 # Google API Settings
 GSC_SCOPES = ['https://www.googleapis.com/auth/webmasters.readonly']
-PAGESPEED_API_KEY = os.getenv('PAGESPEED_API_KEY')  # Optional, works without key but with limits
+PAGESPEED_API_KEY = os.getenv('PAGESPEED_API_KEY')  # Optional
 
 # API Rate Limits
 GSC_API_QUOTA = {
@@ -165,7 +168,7 @@ INSIGHT_PROMPTS = {
 
 # Error Messages
 ERROR_MESSAGES = {
-    'auth_failed': "Authentication failed. Please check your credentials.",
+    'auth_failed': "Authentication failed. Please check your credentials and permissions.",
     'api_quota': "API quota exceeded. Please try again later.",
     'no_data': "No data available for the selected date range.",
     'invalid_url': "Please enter a valid website URL.",
