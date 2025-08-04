@@ -1,6 +1,5 @@
 """
-Simple Authentication for Streamlit Cloud
-No auto-detection, just straightforward OAuth
+Authentication for GSC - Forces correct redirect URI
 """
 
 import streamlit as st
@@ -15,9 +14,6 @@ from config import (
     GSC_SCOPES, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
     ERROR_MESSAGES, SUCCESS_MESSAGES
 )
-
-# CHANGE THIS TO YOUR ACTUAL STREAMLIT APP URL
-STREAMLIT_APP_URL = "https://gsc-audit-agent.streamlit.app/"  # <-- PUT YOUR URL HERE!
 
 
 class GSCAuthenticator:
@@ -39,10 +35,15 @@ class GSCAuthenticator:
             return [prop['siteUrl'] for prop in response.get('siteEntry', [])]
         except:
             return []
+    
+    def verify_property_access(self, property_url):
+        """Verify property access"""
+        properties = self.list_properties()
+        return property_url in properties
 
 
 def handle_authentication():
-    """Simple authentication handler"""
+    """Authentication handler that forces correct redirect URI"""
     
     st.sidebar.header("🔐 Google Search Console")
     
@@ -80,73 +81,96 @@ def handle_authentication():
         except:
             pass
     
-    # Determine redirect URI
-    if os.getenv('STREAMLIT_SHARING_MODE') or st.sidebar.checkbox("Using Streamlit Cloud"):
-        redirect_uri = STREAMLIT_APP_URL
-        st.sidebar.info(f"Using redirect URI: {redirect_uri}")
-    else:
-        redirect_uri = "http://localhost:8501/"
-        st.sidebar.info("Using local redirect URI")
-    
-    # Check for OAuth callback
+    # FORCE the correct redirect URI based on where we're running
+    # Check if we're on Streamlit Cloud by looking for the Streamlit Cloud domain
     query_params = st.experimental_get_query_params()
     
+    # Get the current page URL to determine environment
+    # If we have a 'code' parameter, we're in a callback and can see our URL
     if 'code' in query_params:
-        st.sidebar.info("Completing authentication...")
+        # We're in OAuth callback - determine redirect URI from error or context
+        # For now, try both URLs
+        possible_urls = [
+            "https://gsc-audit-agent.streamlit.app/",
+            "http://localhost:8501/"
+        ]
         
+        st.sidebar.info("Completing authentication...")
         code = query_params['code'][0]
         
-        # Create flow and exchange code
-        flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [redirect_uri]
-                }
-            },
-            scopes=GSC_SCOPES,
-            redirect_uri=redirect_uri
-        )
+        # Try each possible redirect URI
+        success = False
+        last_error = None
         
-        try:
-            flow.fetch_token(code=code)
-            creds = flow.credentials
-            
-            # Save and use
-            with open(token_file, 'wb') as f:
-                pickle.dump(creds, f)
-            
-            service = build('searchconsole', 'v1', credentials=creds)
-            st.session_state.gsc_service = service
-            st.session_state.authenticated = True
-            
-            st.experimental_set_query_params()
-            st.success("✅ Connected successfully!")
-            st.rerun()
-            
-        except Exception as e:
-            st.sidebar.error(f"Failed: {str(e)}")
-            st.sidebar.error(f"Make sure this EXACT URL is in Google Cloud Console: {redirect_uri}")
+        for redirect_uri in possible_urls:
+            try:
+                flow = Flow.from_client_config(
+                    {
+                        "web": {
+                            "client_id": GOOGLE_CLIENT_ID,
+                            "client_secret": GOOGLE_CLIENT_SECRET,
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                            "redirect_uris": [redirect_uri]
+                        }
+                    },
+                    scopes=GSC_SCOPES,
+                    redirect_uri=redirect_uri
+                )
+                
+                flow.fetch_token(code=code)
+                creds = flow.credentials
+                
+                # Success! Save credentials
+                with open(token_file, 'wb') as f:
+                    pickle.dump(creds, f)
+                
+                service = build('searchconsole', 'v1', credentials=creds)
+                st.session_state.gsc_service = service
+                st.session_state.authenticated = True
+                
+                st.experimental_set_query_params()
+                st.success("✅ Connected successfully!")
+                success = True
+                st.rerun()
+                break
+                
+            except Exception as e:
+                last_error = str(e)
+                continue
+        
+        if not success:
+            st.sidebar.error(f"Authentication failed: {last_error}")
             st.experimental_set_query_params()
     
     else:
+        # Determine redirect URI for auth URL
+        # Simple logic: if running in a Streamlit Cloud environment, use the cloud URL
+        
+        # Check multiple indicators
+        is_cloud = any([
+            os.getenv('STREAMLIT_SHARING_MODE'),  # Streamlit Cloud env var
+            os.getenv('STREAMLIT_RUNTIME_ENV') == 'cloud',  # Another possible env var
+            not os.path.exists('/home/adminuser/venv'),  # Local dev usually doesn't have this
+        ])
+        
+        # Let user override if detection is wrong
+        environment = st.sidebar.radio(
+            "Where are you running this app?",
+            ["Streamlit Cloud", "Local Development"],
+            index=0 if is_cloud else 1,
+            help="Select where you're currently running the app"
+        )
+        
+        if environment == "Streamlit Cloud":
+            redirect_uri = "https://gsc-audit-agent.streamlit.app/"
+        else:
+            redirect_uri = "http://localhost:8501/"
+        
+        st.sidebar.info(f"Using redirect URI: `{redirect_uri}`")
+        
         # Show connect button
-        st.sidebar.markdown("### Connect to Google")
-        
-        with st.sidebar.expander("⚠️ Before connecting"):
-            st.markdown(f"""
-            **Add this EXACT URL to Google Cloud Console:**
-            ```
-            {redirect_uri}
-            ```
-            
-            Go to APIs & Services → Credentials → Your OAuth Client → Authorized redirect URIs
-            """)
-        
-        if st.sidebar.button("Connect", type="primary", use_container_width=True):
+        if st.sidebar.button("Connect to Google", type="primary", use_container_width=True):
             flow = Flow.from_client_config(
                 {
                     "web": {
@@ -166,6 +190,11 @@ def handle_authentication():
                 prompt='consent'
             )
             
-            st.sidebar.markdown(f"[Click here to authorize]({auth_url})")
+            # Use a meta refresh to redirect
+            st.markdown(
+                f'<meta http-equiv="refresh" content="0;url={auth_url}">',
+                unsafe_allow_html=True
+            )
+            st.info("Redirecting to Google for authorization...")
     
     return False
