@@ -4,18 +4,28 @@ Contains all constants, settings, and configuration parameters
 """
 
 import os
-from datetime import datetime, timedelta
+import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+load_dotenv()  # keeps local dev working
+
+def get_secret(key, default=None):
+    """Return value from env var first, then Streamlit secrets."""
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        return st.secrets[key]
+    except (KeyError, AttributeError):
+        return default
 
 # API Keys and Authentication
-GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
-GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
-GOOGLE_AI_API_KEY = os.getenv('GOOGLE_AI_API_KEY')
+GOOGLE_CLIENT_ID     = get_secret("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = get_secret("GOOGLE_CLIENT_SECRET")
+OPENAI_API_KEY       = get_secret("OPENAI_API_KEY")
+ANTHROPIC_API_KEY    = get_secret("ANTHROPIC_API_KEY")
+GOOGLE_AI_API_KEY    = get_secret("GOOGLE_AI_API_KEY")
+PAGESPEED_API_KEY    = get_secret("PAGESPEED_API_KEY")
 
 # Debug mode
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
@@ -182,3 +192,4 @@ SUCCESS_MESSAGES = {
     'analysis_complete': "Analysis completed successfully!",
     'report_generated': "Report generated successfully!"
 }
+
